@@ -8,6 +8,7 @@ from functools import wraps
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'your_secret_key_here')
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
 # Database Connection Helper
 def get_db_connection():
@@ -72,6 +73,15 @@ def serve_image(filename):
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    # If user is already authenticated, redirect to appropriate role dashboard
+    if request.method == 'GET' and 'role' in session:
+        if session['role'] == 'admin':
+            return redirect(url_for('admin_dashboard'))
+        elif session['role'] == 'doctor':
+            return redirect(url_for('doctor_dashboard'))
+        elif session['role'] == 'user':
+            return redirect(url_for('user_dashboard'))
+
     if request.method == 'POST':
         login_type = request.form.get('login_type')
         
@@ -86,6 +96,7 @@ def login():
             user = cursor.fetchone()
             
             if user:
+                session.permanent = True
                 session['user_id'] = user['id']
                 session['role'] = user['role']
                 session['name'] = user['name']
@@ -103,6 +114,7 @@ def login():
             employee = cursor.fetchone()
             
             if employee:
+                session.permanent = True
                 session['employee_id'] = employee['id']
                 session['role'] = 'doctor'
                 session['name'] = employee['name']
@@ -118,6 +130,9 @@ def login():
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
+    # If user is already authenticated, redirect to user dashboard
+    if request.method == 'GET' and 'role' in session:
+        return redirect(url_for('user_dashboard'))
     if request.method == 'POST':
         name = request.form.get('name')
         email = request.form.get('email')
@@ -260,6 +275,7 @@ def reset_password():
         
     return render_template('reset_password.html')
 
+@app.route('/user/bookings')
 @app.route('/user/dashboard')
 @user_required
 def user_dashboard():
@@ -308,6 +324,54 @@ def user_dashboard():
     conn.close()
     return render_template('user_dashboard.html', appointments=appointments, 
                            pending_cancel=pending_cancel, pending_reschedule=pending_reschedule)
+
+@app.route('/user/profile', methods=['GET', 'POST'])
+@user_required
+def user_profile():
+    user_id = session.get('user_id')
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    
+    if request.method == 'POST':
+        name = request.form.get('name')
+        new_password = request.form.get('new_password')
+        confirm_password = request.form.get('confirm_password')
+        
+        if not name or not name.strip():
+            flash('Name cannot be empty.', 'danger')
+        elif new_password:
+            if new_password != confirm_password:
+                flash('Passwords do not match.', 'danger')
+            else:
+                cursor.execute("UPDATE users SET name = %s, password = %s WHERE id = %s", (name.strip(), new_password, user_id))
+                conn.commit()
+                session['name'] = name.strip()
+                flash('Profile and password updated successfully.', 'success')
+        else:
+            cursor.execute("UPDATE users SET name = %s WHERE id = %s", (name.strip(), user_id))
+            conn.commit()
+            session['name'] = name.strip()
+            flash('Profile updated successfully.', 'success')
+            
+    cursor.execute("SELECT id, name, email, role FROM users WHERE id = %s", (user_id,))
+    user = cursor.fetchone()
+    
+    cursor.execute("SELECT COUNT(*) AS total FROM appointments WHERE user_id = %s", (user_id,))
+    total_appointments = cursor.fetchone()['total']
+    
+    cursor.execute("SELECT COUNT(*) AS pending FROM appointments WHERE user_id = %s AND status = 'Pending'", (user_id,))
+    pending_appointments = cursor.fetchone()['pending']
+    
+    cursor.execute("SELECT COUNT(*) AS approved FROM appointments WHERE user_id = %s AND status = 'Approved'", (user_id,))
+    approved_appointments = cursor.fetchone()['approved']
+    
+    cursor.close()
+    conn.close()
+    
+    return render_template('user_profile.html', user=user, 
+                           total_appointments=total_appointments,
+                           pending_appointments=pending_appointments,
+                           approved_appointments=approved_appointments)
 
 @app.route('/user/appointment/<int:id>/request_cancel')
 @user_required
